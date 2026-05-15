@@ -1,2 +1,4 @@
 venv/
 search_covers/
+
+__pycache__/

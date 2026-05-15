@@ -2,6 +2,8 @@ from bs4 import BeautifulSoup
 import requests
 import os
 import json
+import re
+from urllib.parse import urljoin, urlparse
 
 
 
@@ -68,24 +70,117 @@ def get_manga_series(series_uuid):
     response = requests.get(full_chapter_list_url, headers=headers)
     soup = BeautifulSoup(response.text, "lxml")
 
+    chapters = []
     for chapter in soup.find_all("div"):
         chapter_link = chapter.select_one("a").get("href")
         parent_span = chapter.select_one("span.grow.flex")
         if parent_span:
             chapter_title = parent_span.find("span", class_="").get_text(strip=True)
-            print(chapter_link, chapter_title)
+            chapters.append({
+                "chapter_link": chapter_link,
+                "chapter_title": chapter_title,
+            })
     
+    return chapters
+
+
+
+def safe_filename(name):
+    parts = [part.strip() for part in name.split("|") if part.strip()]
+    parts = [part for part in parts if part.lower() != "weeb central"]
+    name = " ".join(parts)
+    name = "".join(char if char.isalnum() or char in " _-" else "_" for char in name)
+    return re.sub(r"\s+", "_", name).strip("_")
+
+
+def get_image_extension(image_url, response):
+    path_extension = os.path.splitext(urlparse(image_url).path)[1]
+    if path_extension:
+        return path_extension
+
+    content_type = response.headers.get("Content-Type", "").split(";")[0]
+    return {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }.get(content_type, ".jpg")
+
+
+def download_chapter(chapter_link, folder="downloads"):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    response = session.get(chapter_link)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "lxml")
+
+    image_section = soup.select_one("section[hx-get*='/images']")
+    if not image_section:
+        print("No image loader found on this chapter page.")
+        return []
+
+    images_url = urljoin(chapter_link, image_section.get("hx-get"))
+    images_response = session.get(
+        images_url,
+        params={"reading_style": "long_strip"},
+        headers={
+            "Referer": chapter_link,
+            "HX-Request": "true",
+        },
+    )
+    images_response.raise_for_status()
+
+    images_soup = BeautifulSoup(images_response.text, "lxml")
+    image_urls = []
+    for img in images_soup.find_all("img"):
+        image_url = img.get("src")
+        if image_url:
+            image_urls.append(urljoin(images_url, image_url))
+
+    if not image_urls:
+        print("No chapter images found.")
+        return []
+
+    title = soup.select_one("title")
+    chapter_folder_name = safe_filename(title.get_text(" ", strip=True) if title else "chapter")
+    chapter_folder = os.path.join(folder, chapter_folder_name)
+    os.makedirs(chapter_folder, exist_ok=True)
+
+    print(f"Found {len(image_urls)} pages.")
+    print(f"Downloading to: {chapter_folder}")
+
+    downloaded_files = []
+    for index, image_url in enumerate(image_urls, start=1):
+        image_response = session.get(image_url, headers={"Referer": chapter_link})
+        image_response.raise_for_status()
+
+        extension = get_image_extension(image_url, image_response)
+        filename = os.path.join(chapter_folder, f"{index:03}{extension}")
+        with open(filename, "wb") as file:
+            file.write(image_response.content)
+
+        downloaded_files.append(filename)
+        print(f"✓ Page {index}/{len(image_urls)}")
+
+    return downloaded_files
+
+
 
 
 if __name__ == "__main__":
 
     while True:
-        search_query = input("\nEnter manga name to search: ")
+        search_query = input("Enter manga name to search: ")
         results = get_manga_list(search_query)
-        # print(json.dumps(results, indent=4))
-        # download_covers(results, folder="search_covers")
-        for i, result in enumerate(results):
-            print(f"{i+1}. {result['title']}")
+
+
+        for i, result in enumerate(results, start=1):
+            print(f"{i}. {result['title']}")
 
         if len(results) == 0:
             print("No results found.")
@@ -95,5 +190,15 @@ if __name__ == "__main__":
         if choice.isdigit() and 1 <= int(choice) <= len(results):
             selected_result = results[int(choice) - 1]
             print(f"\nSending GET request to {selected_result['series_url']}...\n")
-            get_manga_series(selected_result['series_uuid'])
-            
+            chapters = get_manga_series(selected_result['series_uuid'])
+            for i, chapter in enumerate(chapters[::-1], start=1):
+                print(f"{i}. {chapter['chapter_title']}")
+            choice = input(f"\nEnter the number of the chapter to download ({1}-{len(chapters)}): ")
+            if choice.isdigit() and 1 <= int(choice) <= len(chapters):
+                selected_chapter = chapters[int(choice) - 1]
+                print(f"\nSending GET request to {selected_chapter['chapter_link']}...\n")
+                download_chapter(selected_chapter['chapter_link'])
+            else:
+                print("Invalid input. Please enter a valid number.")
+        else:
+            print("Invalid input. Please enter a valid number.")
