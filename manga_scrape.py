@@ -69,34 +69,31 @@ def get_manga_series(series_uuid):
     soup = BeautifulSoup(response.text, "lxml")
 
     for chapter in soup.find_all("div"):
+        chapter_link = chapter.select_one("a").get("href")
         parent_span = chapter.select_one("span.grow.flex")
         if parent_span:
             chapter_title = parent_span.find("span", class_="").get_text(strip=True)
-            print(chapter_title)
+            print(chapter_link, chapter_title)
     
 
 
 if __name__ == "__main__":
-    search_query = input("Enter manga name to search: ")
-    results = get_manga_list(search_query)
-    # print(json.dumps(results, indent=4))
-    # download_covers(results, folder="search_covers")
-    for i, result in enumerate(results):
-        print(f"{i+1}. {result['title']}")
-
-    if len(results) == 0:
-        print("No results found.")
-        exit()
 
     while True:
-        choice = input(f"Enter the number of the manga to download ({1}-{len(results)}) or 'q' to quit: ")
-        if choice == "q":
-            break
+        search_query = input("\nEnter manga name to search: ")
+        results = get_manga_list(search_query)
+        # print(json.dumps(results, indent=4))
+        # download_covers(results, folder="search_covers")
+        for i, result in enumerate(results):
+            print(f"{i+1}. {result['title']}")
+
+        if len(results) == 0:
+            print("No results found.")
+            continue
+
+        choice = input(f"\nEnter the number of the manga to download ({1}-{len(results)}): ")
         if choice.isdigit() and 1 <= int(choice) <= len(results):
             selected_result = results[int(choice) - 1]
-            print(f"Sending GET request to {selected_result['series_url']}...")
+            print(f"\nSending GET request to {selected_result['series_url']}...\n")
             get_manga_series(selected_result['series_uuid'])
             
-            # download_covers([selected_result], folder="search_covers")
-            break
-        print("Invalid input. Please enter a valid number or 'q' to quit.")
