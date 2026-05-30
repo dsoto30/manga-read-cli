@@ -1,3 +1,5 @@
 venv/
 search_covers/
-__pycache__
+
+__pycache__/
+downloads/
