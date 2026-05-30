@@ -1,9 +1,11 @@
 from bs4 import BeautifulSoup
 import requests
 import os
-import json
 import re
 from urllib.parse import urljoin, urlparse
+import img2pdf
+
+
 
 
 
@@ -106,6 +108,8 @@ def get_image_extension(image_url, response):
         "image/gif": ".gif",
     }.get(content_type, ".jpg")
 
+    
+
 
 def download_chapter(chapter_link, folder="downloads"):
     headers = {
@@ -151,8 +155,6 @@ def download_chapter(chapter_link, folder="downloads"):
     chapter_folder = os.path.join(folder, chapter_folder_name)
     os.makedirs(chapter_folder, exist_ok=True)
 
-    print(f"Found {len(image_urls)} pages.")
-    print(f"Downloading to: {chapter_folder}")
 
     downloaded_files = []
     for index, image_url in enumerate(image_urls, start=1):
@@ -167,10 +169,18 @@ def download_chapter(chapter_link, folder="downloads"):
         downloaded_files.append(filename)
         print(f"✓ Page {index}/{len(image_urls)}")
 
-    return downloaded_files
+    create_pdf_from_images(downloaded_files, os.path.join(chapter_folder, f"{chapter_folder_name}.pdf"))
+    
+    # Clean up image files
+    for file in downloaded_files:
+        os.remove(file)
+    
 
 
 
+def create_pdf_from_images(image_files, output_path):
+    with open(output_path, "wb") as f:
+        f.write(img2pdf.convert(image_files))
 
 if __name__ == "__main__":
 
@@ -191,7 +201,8 @@ if __name__ == "__main__":
             selected_result = results[int(choice) - 1]
             print(f"\nSending GET request to {selected_result['series_url']}...\n")
             chapters = get_manga_series(selected_result['series_uuid'])
-            for i, chapter in enumerate(chapters[::-1], start=1):
+            chapters.reverse()
+            for i, chapter in enumerate(chapters, start=1):
                 print(f"{i}. {chapter['chapter_title']}")
             choice = input(f"\nEnter the number of the chapter to download ({1}-{len(chapters)}): ")
             if choice.isdigit() and 1 <= int(choice) <= len(chapters):
