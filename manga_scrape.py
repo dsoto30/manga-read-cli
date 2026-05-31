@@ -1,9 +1,11 @@
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import httpx
 import os
 import re
 from urllib.parse import urljoin, urlparse
 import img2pdf
+from tqdm import tqdm
 
 
 def get_manga_list(client, search_query):
@@ -90,6 +92,16 @@ def get_image_extension(image_url, response):
     }.get(content_type, ".jpg")
 
 
+def _download_image(client, index, image_url, chapter_folder, chapter_link):
+    image_response = client.get(image_url, headers={"Referer": chapter_link})
+    image_response.raise_for_status()
+    extension = get_image_extension(image_url, image_response)
+    filename = os.path.join(chapter_folder, f"{index:03}{extension}")
+    with open(filename, "wb") as file:
+        file.write(image_response.content)
+    return index, filename
+
+
 def download_chapter(client, chapter_link, folder="downloads"):
     response = client.get(chapter_link)
     response.raise_for_status()
@@ -124,18 +136,19 @@ def download_chapter(client, chapter_link, folder="downloads"):
     chapter_folder = os.path.join(folder, chapter_folder_name)
     os.makedirs(chapter_folder, exist_ok=True)
 
-    downloaded_files = []
-    for index, image_url in enumerate(image_urls, start=1):
-        image_response = client.get(image_url, headers={"Referer": chapter_link})
-        image_response.raise_for_status()
+    index_to_file = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(_download_image, client, i, url, chapter_folder, chapter_link): i
+            for i, url in enumerate(image_urls, start=1)
+        }
+        with tqdm(total=len(futures), desc="Downloading chapter") as bar:
+            for future in as_completed(futures):
+                index, filename = future.result()
+                index_to_file[index] = filename
+                bar.update(1)
 
-        extension = get_image_extension(image_url, image_response)
-        filename = os.path.join(chapter_folder, f"{index:03}{extension}")
-        with open(filename, "wb") as file:
-            file.write(image_response.content)
-
-        downloaded_files.append(filename)
-        print(f"✓ Page {index}/{len(image_urls)}")
+    downloaded_files = [index_to_file[i] for i in sorted(index_to_file)]
 
     create_pdf_from_images(downloaded_files, os.path.join(chapter_folder, f"{chapter_folder_name}.pdf"))
 
