@@ -200,7 +200,7 @@ if __name__ == "__main__":
 
     transport = httpx.HTTPTransport(retries=3)
 
-    with httpx.Client(headers=headers, timeout=httpx.Timeout(30.0, connect=None), transport=transport, http2=True) as client:
+    with httpx.Client(headers=headers, timeout=30.0, transport=transport, http2=True) as client:
         while True:
             search_query = input("Enter manga name to search: ")
             results = get_manga_list(client, search_query)
