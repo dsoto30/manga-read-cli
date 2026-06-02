@@ -8,52 +8,36 @@ import shutil
 import tempfile
 from urllib.parse import urljoin, urlparse
 import img2pdf
-from tqdm import tqdm
+import questionary
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from rich.prompt import Prompt
+from rich.table import Table
 
+console = Console()
+app = typer.Typer(add_completion=False)
+
+
+# ── scraping ──────────────────────────────────────────────────────────────────
 
 def get_manga_list(client, search_query):
     url = "https://weebcentral.com/search/simple?location=main"
     response = client.post(url, data={"text": search_query})
-
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "lxml")
     results = []
-
     for a in soup.select("a.btn.join-item"):
         title = a.select_one("div.flex-1").get_text(strip=True)
         href = a.get("href")
         series_uuid = href.split("/series/")[-1].split("/")[0]
-
         source = a.find("source", type="image/webp")
         img = a.find("img")
-        img_url = img.get("src") if img else source.get("srcset")
-
-        results.append({
-            "title": title,
-            "series_uuid": series_uuid,
-            "img_url": img_url,
-            "series_url": href,
-        })
-
+        img_url = (img.get("src") if img else None) or (source.get("srcset") if source else None) or ""
+        results.append({"title": title, "series_uuid": series_uuid, "img_url": img_url, "series_url": href})
     return results
-
-
-def download_covers(client, results, folder="search_covers"):
-    os.makedirs(folder, exist_ok=True)
-
-    for item in results:
-        safe_title = item["title"].replace(" ", "_").replace("/", "-")
-        ext = "webp" if "webp" in item["img_url"] else "jpg"
-        filename = f"{folder}/{safe_title}.{ext}"
-
-        img_response = client.get(item["img_url"])
-        if img_response.status_code == 200:
-            with open(filename, "wb") as f:
-                f.write(img_response.content)
-            print(f"✓ {item['title']}")
-        else:
-            print(f"✗ Failed: {item['title']}")
 
 
 def get_manga_series(client, series_uuid):
@@ -62,7 +46,6 @@ def get_manga_series(client, series_uuid):
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "lxml")
-
     chapters = []
     for chapter in soup.find_all("div"):
         a_tag = chapter.select_one("a")
@@ -72,13 +55,11 @@ def get_manga_series(client, series_uuid):
         parent_span = chapter.select_one("span.grow.flex")
         if parent_span:
             chapter_title = parent_span.find("span", class_="").get_text(strip=True)
-            chapters.append({
-                "chapter_link": chapter_link,
-                "chapter_title": chapter_title,
-            })
-
+            chapters.append({"chapter_link": chapter_link, "chapter_title": chapter_title})
     return chapters
 
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def safe_filename(name):
     parts = [part.strip() for part in name.split("|") if part.strip()]
@@ -101,7 +82,6 @@ def get_image_extension(image_url, response):
     path_extension = os.path.splitext(urlparse(image_url).path)[1]
     if path_extension:
         return path_extension
-
     content_type = response.headers.get("Content-Type", "").split(";")[0]
     return {
         "image/jpeg": ".jpg",
@@ -111,34 +91,24 @@ def get_image_extension(image_url, response):
     }.get(content_type, ".jpg")
 
 
-def _download_image(client, index, image_url, chapter_folder, chapter_link):
+def _download_image(client, index, image_url, dest_dir, chapter_link):
     image_response = client.get(image_url, headers={"Referer": chapter_link})
     image_response.raise_for_status()
     extension = get_image_extension(image_url, image_response)
-    filename = os.path.join(chapter_folder, f"{index:03}{extension}")
+    filename = os.path.join(dest_dir, f"{index:03}{extension}")
     with open(filename, "wb") as file:
         file.write(image_response.content)
     return index, filename
 
 
-def download_chapter(client, chapter_link, manga_title, chapter_title, folder="downloads"):
-    manga_folder = os.path.join(folder, safe_filename(manga_title))
-    pdf_path = os.path.join(manga_folder, f"{chapter_pdf_name(chapter_title)}.pdf")
-
-    if os.path.exists(pdf_path):
-        choice = input(f"{pdf_path} already exists. Overwrite? (y/n): ").strip().lower()
-        if choice not in ("y", "yes"):
-            print("Skipped.")
-            return
-
+def _fetch_image_urls(client, chapter_link):
     response = client.get(chapter_link)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "lxml")
 
     image_section = soup.select_one("section[hx-get*='/images']")
     if not image_section:
-        print("No image loader found on this chapter page.")
-        return
+        return []
 
     images_url = urljoin(chapter_link, image_section.get("hx-get"))
     images_response = client.get(
@@ -149,40 +119,37 @@ def download_chapter(client, chapter_link, manga_title, chapter_title, folder="d
     images_response.raise_for_status()
 
     images_soup = BeautifulSoup(images_response.text, "lxml")
-    image_urls = [
-        urljoin(images_url, img.get("src"))
+    return [
+        (urljoin(images_url, img.get("src")), chapter_link)
         for img in images_soup.find_all("img")
         if img.get("src")
     ]
 
-    if not image_urls:
-        print("No chapter images found.")
-        return
 
-    os.makedirs(manga_folder, exist_ok=True)
-    temp_dir = tempfile.mkdtemp()
-
-    try:
-        index_to_file = {}
+def _parallel_download(client, image_urls, dest_dir):
+    index_to_file = {}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Downloading pages...", total=len(image_urls))
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {
-                executor.submit(_download_image, client, i, url, temp_dir, chapter_link): i
-                for i, url in enumerate(image_urls, start=1)
+                executor.submit(_download_image, client, i, url, dest_dir, referer): i
+                for i, (url, referer) in enumerate(image_urls, start=1)
             }
-            with tqdm(total=len(futures), desc="Downloading chapter") as bar:
-                for future in as_completed(futures):
-                    try:
-                        index, filename = future.result()
-                        index_to_file[index] = filename
-                    except Exception as e:
-                        print(f"\nFailed to download image: {e}")
-                    bar.update(1)
+            for future in as_completed(futures):
+                try:
+                    index, filename = future.result()
+                    index_to_file[index] = filename
+                except Exception as e:
+                    console.print(f"\n[red]Failed to download image: {e}[/red]")
+                progress.advance(task)
 
-        downloaded_files = [index_to_file[i] for i in sorted(index_to_file)]
-        create_pdf_from_images(downloaded_files, pdf_path)
-        print(f"Saved: {pdf_path}")
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    return [index_to_file[i] for i in sorted(index_to_file)]
 
 
 def create_pdf_from_images(image_files, output_path):
@@ -198,46 +165,161 @@ def create_pdf_from_images(image_files, output_path):
         f.write(img2pdf.convert(converted))
 
 
-if __name__ == "__main__":
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+# ── actions ───────────────────────────────────────────────────────────────────
 
+def download_chapter(client, chapter_link, manga_title, chapter_title, folder="downloads"):
+    manga_folder = os.path.join(folder, safe_filename(manga_title))
+    pdf_path = os.path.join(manga_folder, f"{chapter_pdf_name(chapter_title)}.pdf")
+
+    if os.path.exists(pdf_path):
+        if not typer.confirm(f"{pdf_path} already exists. Overwrite?", default=False):
+            console.print("[yellow]Skipped.[/yellow]")
+            return
+
+    with console.status("Fetching page list..."):
+        image_urls = _fetch_image_urls(client, chapter_link)
+
+    if not image_urls:
+        console.print("[red]No images found on this chapter page.[/red]")
+        return
+
+    os.makedirs(manga_folder, exist_ok=True)
+    temp_dir = tempfile.mkdtemp()
+    try:
+        files = _parallel_download(client, image_urls, temp_dir)
+        create_pdf_from_images(files, pdf_path)
+        console.print(f"[green]Saved:[/green] {pdf_path}")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def read_chapter(client, chapter_link, chapter_title):
+    try:
+        from term_image.image import from_file
+    except ImportError:
+        console.print("[red]term-image not found.[/red] Run: venv/bin/pip install term-image")
+        return
+
+    import readchar
+
+    with console.status("Fetching page list..."):
+        image_urls = _fetch_image_urls(client, chapter_link)
+
+    if not image_urls:
+        console.print("[red]No images found on this chapter page.[/red]")
+        return
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        files = _parallel_download(client, image_urls, temp_dir)
+
+        current = 0
+        while True:
+            console.clear()
+            console.print(Panel(
+                f"[bold]{chapter_title}[/bold]  —  Page {current + 1} of {len(files)}\n"
+                "[dim]← · prev    → · next    Enter · quit[/dim]",
+                border_style="cyan",
+            ))
+            try:
+                from_file(files[current]).draw()
+            except Exception as e:
+                console.print(f"[red]Could not render image:[/red] {e}")
+                console.print("[dim]Your terminal may not support inline images. Try iTerm2 or Kitty.[/dim]")
+
+            key = readchar.readkey()
+            if key == readchar.key.ENTER:
+                break
+            elif key == readchar.key.LEFT and current > 0:
+                current -= 1
+            elif key == readchar.key.RIGHT and current < len(files) - 1:
+                current += 1
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ── TUI ───────────────────────────────────────────────────────────────────────
+
+_BACK = object()
+
+
+def _pick(items, label_key, title):
+    choices = [questionary.Choice(title=item[label_key], value=item) for item in items]
+    choices.append(questionary.Choice(title="← Back", value=_BACK))
+    result = questionary.select(title, choices=choices, use_shortcuts=False).ask()
+    if result is None or result is _BACK:
+        return None
+    return result
+
+
+@app.command()
+def main():
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     transport = httpx.HTTPTransport(retries=3)
 
-    with httpx.Client(headers=headers, timeout=30.0, transport=transport, http2=True) as client:
+    with httpx.Client(
+        headers=headers,
+        timeout=httpx.Timeout(30.0, connect=10.0),
+        transport=transport,
+        http2=True,
+    ) as client:
         while True:
-            search_query = input("Enter manga name to search: ")
-            results = get_manga_list(client, search_query)
+            console.print(Panel("[bold cyan]Manga Reader[/bold cyan]", border_style="cyan", expand=False))
+
+            search_query = Prompt.ask("[cyan]Search[/cyan]")
+            with console.status("Searching..."):
+                try:
+                    results = get_manga_list(client, search_query)
+                except Exception as e:
+                    console.print(f"[red]Search failed:[/red] {e}")
+                    continue
 
             if not results:
-                print("No results found.")
+                console.print("[yellow]No results found.[/yellow]")
                 continue
 
-            for i, result in enumerate(results, start=1):
-                print(f"{i}. {result['title']}")
-
-            choice = input(f"\nEnter the number of the manga to download (1-{len(results)}): ")
-            if not (choice.isdigit() and 1 <= int(choice) <= len(results)):
-                print("Invalid input. Please enter a valid number.")
+            selected_manga = _pick(results, "title", "Search Results")
+            if not selected_manga:
                 continue
 
-            selected_result = results[int(choice) - 1]
-            print(f"\nFetching chapters for {selected_result['title']}...\n")
-            chapters = get_manga_series(client, selected_result["series_uuid"])
-            chapters.reverse()
+            with console.status(f"Fetching chapters for [bold]{selected_manga['title']}[/bold]..."):
+                try:
+                    chapters = get_manga_series(client, selected_manga["series_uuid"])
+                    chapters.reverse()
+                except Exception as e:
+                    console.print(f"[red]Failed to fetch chapters:[/red] {e}")
+                    continue
 
-            for i, chapter in enumerate(chapters, start=1):
-                print(f"{i}. {chapter['chapter_title']}")
-
-            choice = input(f"\nEnter the number of the chapter to download (1-{len(chapters)}): ")
-            if not (choice.isdigit() and 1 <= int(choice) <= len(chapters)):
-                print("Invalid input. Please enter a valid number.")
+            if not chapters:
+                console.print("[yellow]No chapters found.[/yellow]")
                 continue
 
-            selected_chapter = chapters[int(choice) - 1]
-            print(f"\nDownloading {selected_chapter['chapter_title']}...\n")
-            download_chapter(
-                client,
-                selected_chapter["chapter_link"],
-                selected_result["title"],
-                selected_chapter["chapter_title"],
-            )
+            while True:
+                selected_chapter = _pick(chapters, "chapter_title", selected_manga["title"])
+                if not selected_chapter:
+                    break
+
+                mode = questionary.select(
+                    "What do you want to do?",
+                    choices=["download", "read"],
+                ).ask()
+
+                if mode is None:
+                    continue
+                elif mode == "download":
+                    download_chapter(
+                        client,
+                        selected_chapter["chapter_link"],
+                        selected_manga["title"],
+                        selected_chapter["chapter_title"],
+                    )
+                else:
+                    read_chapter(
+                        client,
+                        selected_chapter["chapter_link"],
+                        selected_chapter["chapter_title"],
+                    )
+
+
+if __name__ == "__main__":
+    app()
