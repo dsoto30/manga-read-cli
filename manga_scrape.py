@@ -243,10 +243,10 @@ def read_chapter(client, chapter_link, chapter_title):
 _BACK = object()
 
 
-def _pick(items, label_key, title):
+def _pick(items, label_key, title, default=None):
     choices = [questionary.Choice(title=item[label_key], value=item) for item in items]
     choices.append(questionary.Choice(title="← Back", value=_BACK))
-    result = questionary.select(title, choices=choices, use_shortcuts=False).ask()
+    result = questionary.select(title, choices=choices, use_shortcuts=False, default=default).ask()
     if result is None or result is _BACK:
         return None
     return result
@@ -294,10 +294,12 @@ def main():
                 console.print("[yellow]No chapters found.[/yellow]")
                 continue
 
+            last_chapter = None
             while True:
-                selected_chapter = _pick(chapters, "chapter_title", selected_manga["title"])
+                selected_chapter = _pick(chapters, "chapter_title", selected_manga["title"], default=last_chapter)
                 if not selected_chapter:
                     break
+                last_chapter = selected_chapter
 
                 mode = questionary.select(
                     "What do you want to do?",
