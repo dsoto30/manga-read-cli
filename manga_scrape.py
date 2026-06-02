@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import httpx
 import os
 import re
+import shutil
+import tempfile
 from urllib.parse import urljoin, urlparse
 import img2pdf
 from tqdm import tqdm
@@ -78,6 +80,15 @@ def safe_filename(name):
     return re.sub(r"\s+", "_", name).strip("_")
 
 
+def chapter_pdf_name(chapter_title):
+    match = re.search(r"(?:chapter|ch\.?)\s*(\d+(?:\.\d+)?)", chapter_title, re.I)
+    if not match:
+        match = re.search(r"\b(\d+(?:\.\d+)?)\b", chapter_title)
+    if match:
+        return f"chapter-{match.group(1).replace('.', '_')}"
+    return safe_filename(chapter_title)
+
+
 def get_image_extension(image_url, response):
     path_extension = os.path.splitext(urlparse(image_url).path)[1]
     if path_extension:
@@ -102,7 +113,16 @@ def _download_image(client, index, image_url, chapter_folder, chapter_link):
     return index, filename
 
 
-def download_chapter(client, chapter_link, folder="downloads"):
+def download_chapter(client, chapter_link, manga_title, chapter_title, folder="downloads"):
+    manga_folder = os.path.join(folder, safe_filename(manga_title))
+    pdf_path = os.path.join(manga_folder, f"{chapter_pdf_name(chapter_title)}.pdf")
+
+    if os.path.exists(pdf_path):
+        choice = input(f"{pdf_path} already exists. Overwrite? (y/n): ").strip().lower()
+        if choice not in ("y", "yes"):
+            print("Skipped.")
+            return
+
     response = client.get(chapter_link)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "lxml")
@@ -131,29 +151,27 @@ def download_chapter(client, chapter_link, folder="downloads"):
         print("No chapter images found.")
         return
 
-    title = soup.select_one("title")
-    chapter_folder_name = safe_filename(title.get_text(" ", strip=True) if title else "chapter")
-    chapter_folder = os.path.join(folder, chapter_folder_name)
-    os.makedirs(chapter_folder, exist_ok=True)
+    os.makedirs(manga_folder, exist_ok=True)
+    temp_dir = tempfile.mkdtemp()
 
-    index_to_file = {}
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {
-            executor.submit(_download_image, client, i, url, chapter_folder, chapter_link): i
-            for i, url in enumerate(image_urls, start=1)
-        }
-        with tqdm(total=len(futures), desc="Downloading chapter") as bar:
-            for future in as_completed(futures):
-                index, filename = future.result()
-                index_to_file[index] = filename
-                bar.update(1)
+    try:
+        index_to_file = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(_download_image, client, i, url, temp_dir, chapter_link): i
+                for i, url in enumerate(image_urls, start=1)
+            }
+            with tqdm(total=len(futures), desc="Downloading chapter") as bar:
+                for future in as_completed(futures):
+                    index, filename = future.result()
+                    index_to_file[index] = filename
+                    bar.update(1)
 
-    downloaded_files = [index_to_file[i] for i in sorted(index_to_file)]
-
-    create_pdf_from_images(downloaded_files, os.path.join(chapter_folder, f"{chapter_folder_name}.pdf"))
-
-    for file in downloaded_files:
-        os.remove(file)
+        downloaded_files = [index_to_file[i] for i in sorted(index_to_file)]
+        create_pdf_from_images(downloaded_files, pdf_path)
+        print(f"Saved: {pdf_path}")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def create_pdf_from_images(image_files, output_path):
@@ -196,4 +214,9 @@ if __name__ == "__main__":
 
             selected_chapter = chapters[int(choice) - 1]
             print(f"\nDownloading {selected_chapter['chapter_title']}...\n")
-            download_chapter(client, selected_chapter["chapter_link"])
+            download_chapter(
+                client,
+                selected_chapter["chapter_link"],
+                selected_result["title"],
+                selected_chapter["chapter_title"],
+            )
