@@ -2,6 +2,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import httpx
 import os
+from PIL import Image
 import re
 import shutil
 import tempfile
@@ -13,6 +14,8 @@ from tqdm import tqdm
 def get_manga_list(client, search_query):
     url = "https://weebcentral.com/search/simple?location=main"
     response = client.post(url, data={"text": search_query})
+
+    response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "lxml")
     results = []
@@ -56,11 +59,16 @@ def download_covers(client, results, folder="search_covers"):
 def get_manga_series(client, series_uuid):
     url = f"https://weebcentral.com/series/{series_uuid}/full-chapter-list"
     response = client.get(url)
+    response.raise_for_status()
+
     soup = BeautifulSoup(response.text, "lxml")
 
     chapters = []
     for chapter in soup.find_all("div"):
-        chapter_link = chapter.select_one("a").get("href")
+        a_tag = chapter.select_one("a")
+        if not a_tag:
+            continue
+        chapter_link = a_tag.get("href")
         parent_span = chapter.select_one("span.grow.flex")
         if parent_span:
             chapter_title = parent_span.find("span", class_="").get_text(strip=True)
@@ -175,14 +183,24 @@ def download_chapter(client, chapter_link, manga_title, chapter_title, folder="d
 
 
 def create_pdf_from_images(image_files, output_path):
+    converted = []
+    for path in image_files:
+        if path.lower().endswith(".webp"):
+            jpg_path = path[:-5] + ".jpg"
+            Image.open(path).convert("RGB").save(jpg_path, "JPEG", quality=95)
+            converted.append(jpg_path)
+        else:
+            converted.append(path)
     with open(output_path, "wb") as f:
-        f.write(img2pdf.convert(image_files))
+        f.write(img2pdf.convert(converted))
 
 
 if __name__ == "__main__":
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-    with httpx.Client(headers=headers) as client:
+    transport = httpx.HTTPTransport(retries=3)
+
+    with httpx.Client(headers=headers, timeout=httpx.Timeout(30.0, connect=None), transport=transport, http2=True) as client:
         while True:
             search_query = input("Enter manga name to search: ")
             results = get_manga_list(client, search_query)
