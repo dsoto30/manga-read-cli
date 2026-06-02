@@ -171,8 +171,11 @@ def download_chapter(client, chapter_link, manga_title, chapter_title, folder="d
             }
             with tqdm(total=len(futures), desc="Downloading chapter") as bar:
                 for future in as_completed(futures):
-                    index, filename = future.result()
-                    index_to_file[index] = filename
+                    try:
+                        index, filename = future.result()
+                        index_to_file[index] = filename
+                    except Exception as e:
+                        print(f"\nFailed to download image: {e}")
                     bar.update(1)
 
         downloaded_files = [index_to_file[i] for i in sorted(index_to_file)]
