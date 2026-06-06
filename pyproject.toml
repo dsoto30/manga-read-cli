@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manga-read"
+version = "0.1.0"
+description = "Interactive manga reader and downloader CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4",
+    "httpx[http2]",
+    "img2pdf",
+    "lxml",
+    "pillow",
+    "questionary",
+    "readchar",
+    "rich",
+    "term-image",
+    "typer",
+]
+
+[project.scripts]
+manga-read = "manga_scrape:cli"
+
+[tool.setuptools]
+py-modules = ["manga_scrape"]

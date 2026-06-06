@@ -323,5 +323,9 @@ def main():
                     )
 
 
-if __name__ == "__main__":
+def cli():
     app()
+
+
+if __name__ == "__main__":
+    cli()

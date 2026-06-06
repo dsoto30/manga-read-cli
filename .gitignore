@@ -1,5 +1,36 @@
+# Python environments
+.venv/
 venv/
+env/
+ENV/
+
+# Python cache/build metadata
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local configuration/secrets
+.env
+.env.*
+!.env.example
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# App-generated files
+downloads/
 search_covers/
 
-__pycache__/
-downloads/
+# Logs
+*.log
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
