@@ -51,7 +51,7 @@ def get_manga_series(client, series_uuid):
         a_tag = chapter.select_one("a")
         if not a_tag:
             continue
-        chapter_link = a_tag.get("href")
+        chapter_link = urljoin(url, a_tag.get("href"))
         parent_span = chapter.select_one("span.grow.flex")
         if parent_span:
             chapter_title = parent_span.find("span", class_="").get_text(strip=True)
@@ -104,16 +104,11 @@ def _download_image(client, index, image_url, dest_dir, chapter_link):
 def _fetch_image_urls(client, chapter_link):
     response = client.get(chapter_link)
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "lxml")
 
-    image_section = soup.select_one("section[hx-get*='/images']")
-    if not image_section:
-        return []
-
-    images_url = urljoin(chapter_link, image_section.get("hx-get"))
+    images_url = f"{chapter_link}/images"
     images_response = client.get(
         images_url,
-        params={"reading_style": "long_strip"},
+        params={"is_prev": "False", "current_page": "1", "reading_style": "long_strip"},
         headers={"Referer": chapter_link, "HX-Request": "true"},
     )
     images_response.raise_for_status()
